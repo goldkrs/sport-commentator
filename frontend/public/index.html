@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang= en>
+  <head>
+    <meta charset=utf-8 />
+    <meta name=viewport content=width=device-width initial-scale=1 />
+    <title>Video-to-Speech Orchestrator</title>
+    <link rel=stylesheet href=style.css />
+  </head>
+  <body>
+    <main class=app-shell>
+      <h1>Video ? Text ? Speech</h1>
+      <section class=panel>
+        <label class=field>
+          <span>Upload a silent video</span>
+          <input id=videoInput type=file accept=video/* />
+        </label>
+        <div class=controls>
+          <button id=startStream type=button>Start streaming</button>
+          <button id=stopStream type=button>Stop</button>
+          <button id=resetStream type=button>Reset session</button>
+        </div>
+      </section>
+
+      <section class=panel>
+        <h2>Video preview</h2>
+        <video id=videoPreview controls muted playsinline></video>
+      </section>
+
+      <section class=panel>
+        <h2>Live transcript</h2>
+        <div id=transcriptOutput class=transcript-box></div>
+      </section>
+
+      <section class=panel>
+        <h2>Status log</h2>
+        <div id=statusMessages class=status-log></div>
+      </section>
+    </main>
+    <script src=app.js></script>
+  </body>
+</html>
