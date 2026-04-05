@@ -291,6 +291,54 @@ async def generate_from_frames(
     }
 
 
+@app.post("/generate_paragraph")
+async def generate_paragraph_from_frames(
+    prompt: str = Form(COMMENTARY_INSTRUCTION),
+    frames: List[UploadFile] = File(..., description="Frame images in chronological order"),
+    max_new_tokens: int = Form(512, description="Tokens to produce"),
+    temperature: float = Form(0.7, description="Sampling temperature"),
+    top_p: float = Form(0.9, description="Top-p sampling"),
+    top_k: int = Form(40, description="Top-k sampling"),
+    repetition_penalty: float = Form(1.2, description="Penalize repeated tokens"),
+):
+    if not frames:
+        raise HTTPException(status_code=400, detail="At least one frame is required")
+
+    frame_names = [upload.filename or f"frame_{idx}" for idx, upload in enumerate(frames, 1)]
+    images = [await _load_frame_image(upload) for upload in frames]
+    messages = _build_messages(prompt, images)
+
+    start = time.perf_counter()
+    generation = await asyncio.to_thread(
+        _generate_text_from_images,
+        messages,
+        max_new_tokens,
+        temperature,
+        top_p,
+        top_k,
+        repetition_penalty,
+    )
+    duration_ms = (time.perf_counter() - start) * 1000
+
+    if not generation["text"]:
+        raise HTTPException(status_code=500, detail="Model returned an empty response")
+
+    return {
+        "prompt": prompt,
+        "text": generation["text"],
+        "frame_names": frame_names,
+        "tokens_generated": generation["tokens"],
+        "duration_ms": duration_ms,
+        "generation_params": {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "repetition_penalty": repetition_penalty,
+        },
+    }
+
+
 @app.get("/health")
 async def health_check():
     return {"status": "ready", "model": MODEL_ID}

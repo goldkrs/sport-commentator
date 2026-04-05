@@ -3,7 +3,7 @@
   <head>
     <meta charset=utf-8 />
     <meta name=viewport content=width=device-width initial-scale=1 />
-    <title>Video-to-Speech Orchestrator</title>
+    <title>Video ? Text ? Speech</title>
     <link rel=stylesheet href=style.css />
   </head>
   <body>
@@ -15,7 +15,7 @@
           <input id=videoInput type=file accept=video/* />
         </label>
         <div class=controls>
-          <button id=startStream type=button>Start streaming</button>
+          <button id=startStream type=button>Process video</button>
           <button id=stopStream type=button>Stop</button>
           <button id=resetStream type=button>Reset session</button>
         </div>
@@ -23,7 +23,7 @@
 
       <section class=panel>
         <h2>Video preview</h2>
-        <video id=videoPreview controls muted playsinline></video>
+        <video id=videoPreview controls playsinline></video>
       </section>
 
       <section class=panel>
@@ -36,6 +36,14 @@
         <div id=statusMessages class=status-log></div>
       </section>
     </main>
+
+    <div id=loadingOverlay class=loading-overlay hidden>
+      <div class=loading-overlay__content>
+        <p class=loading-overlay__message>Processing silent video…</p>
+        <p class=loading-overlay__hint>Please wait while we capture frames, narrate, and stitch playback.</p>
+      </div>
+    </div>
+
     <script src=app.js></script>
   </body>
 </html>

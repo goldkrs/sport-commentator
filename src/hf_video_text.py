@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, Dict, List
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, UnidentifiedImageError
 
 # IMPORTANT:
@@ -17,6 +18,7 @@ from PIL import Image, UnidentifiedImageError
 HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 HF_API_KEY = os.getenv("HF_API_KEY", "YOUR_HF_API_KEY")
 MODEL_ID = os.getenv("HF_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct:novita")
+HF_CHUNK_SIZE = int(os.getenv("HF_CHUNK_SIZE", "30"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,12 +31,24 @@ COMPANY_STYLE_PROMPT = (
     "Keep the narration concise, vivid, and suitable for speaking; never describe "
     "the scene as frames or metadata. Start sentences with energetic verbs, "
     "avoid repetition, and keep the output short enough that it could be voiced "
-    "within the buffered segment (max 20 tokens)."
+    "within the buffered segment (max 20 tokens). You will receive brief sections "
+    "of frames in sequence, so treat any previously generated narration as context "
+    "and continue building the story from that history. Make sure every response "
+    "completely describes the current action before handing off to the next chunk "
+    "so the transcript does not stop mid-thought."
 )
 
 app = FastAPI(
     title="HF Qwen3-VL WebSocket API",
     description="Video/frame to text using Hugging Face hosted Qwen/Qwen3-VL-8B-Instruct",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 VARIATION_VERBS = ['passes', 'drives', 'shoots', 'threads', 'launches', 'sweeps']
@@ -183,6 +197,12 @@ def format_commentary(raw_text: str, state: Dict[str, int]) -> str:
     return raw_text
 
 
+def chunk_frames(frames: List[Image.Image], size: int) -> List[List[Image.Image]]:
+    if size <= 0:
+        return [frames]
+    return [frames[i : i + size] for i in range(0, len(frames), size)]
+
+
 # -----------------------------
 # HF Calls
 # -----------------------------
@@ -323,7 +343,7 @@ async def load_image(upload: UploadFile) -> Image.Image:
 async def generate_from_frames(
     prompt: str = Form(COMPANY_STYLE_PROMPT),
     frames: List[UploadFile] = File(..., description="Frame images in chronological order"),
-    max_new_tokens: int = Form(512, description="Tokens to produce"),
+    max_new_tokens: int = Form(30, description="Tokens to produce"),
     temperature: float = Form(0.7, description="Sampling temperature"),
     top_p: float = Form(0.9, description="Top-p sampling"),
     top_k: int = Form(40, description="Top-k sampling"),
@@ -342,43 +362,199 @@ async def generate_from_frames(
     )
 
     images = [await load_image(f) for f in frames]
-    messages = build_messages(prompt, images)
+    image_chunks = chunk_frames(images, HF_CHUNK_SIZE)
+    if not image_chunks:
+        logger.error("No visible chunks could be built")
+        raise HTTPException(status_code=400, detail="Unable to build frame chunks")
 
+    history = []
+    total_tokens = 0
+    total_duration_ms = 0.0
     start = time.perf_counter()
-    response = await call_hf_non_streaming(
-        messages,
-        max_new_tokens,
-        temperature,
-        top_p,
-        top_k,
-        repetition_penalty,
-    )
+    final_chunk_text = ""
+
+    for idx, chunk in enumerate(image_chunks):
+        running_context = " ".join(history[-2:])
+        chunk_prompt = (
+            prompt
+            if idx == 0
+            else f"{prompt} Previous narration: {running_context}. Continue with the next batch."
+        )
+        print('chunk size', len(chunk))
+        chunk_messages = build_messages(chunk_prompt, chunk)
+        chunk_start = time.perf_counter()
+        chunk_response = await call_hf_non_streaming(
+            chunk_messages,
+            max_new_tokens,
+            temperature,
+            top_p,
+            top_k,
+            repetition_penalty,
+        )
+        chunk_duration = (time.perf_counter() - chunk_start) * 1000
+        total_duration_ms += chunk_duration
+
+        try:
+            chunk_text = chunk_response["choices"][0]["message"]["content"]
+            usage = chunk_response.get("usage", {})
+        except Exception:
+            logger.exception("Bad HF response shape for chunk %d", idx + 1)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Unexpected HF response for chunk {idx + 1}: {chunk_response}",
+            )
+
+        if not chunk_text:
+            logger.warning("Chunk %d returned empty text, skipping", idx + 1)
+            continue
+
+        history.append(chunk_text.strip())
+        final_chunk_text = chunk_text.strip()
+        total_tokens += usage.get("completion_tokens", 0) or 0
+        logger.info(
+            "/generate chunk %d/%d completed | duration_ms=%.2f | output_len=%d | completion_tokens=%s",
+            idx + 1,
+            len(image_chunks),
+            chunk_duration,
+            len(chunk_text),
+            usage.get("completion_tokens"),
+        )
+
     duration_ms = (time.perf_counter() - start) * 1000
+    if not segments:
+        logger.error("All HF chunk responses were empty")
+        raise HTTPException(status_code=500, detail="Model returned no text for any chunk")
 
-    try:
-        text = response["choices"][0]["message"]["content"]
-        usage = response.get("usage", {})
-    except Exception:
-        logger.exception("Bad HF response shape")
-        raise HTTPException(status_code=502, detail=f"Unexpected HF response: {response}")
-
-    if not text:
-        logger.error("Model returned empty response on /generate")
-        raise HTTPException(status_code=500, detail="Model returned an empty response")
-
+    combined_text = "\n".join(segments)
     logger.info(
-        "/generate completed | duration_ms=%.2f | output_len=%d | completion_tokens=%s",
+        "/generate completed | total_duration_ms=%.2f | aggregated_len=%d | total_completion_tokens=%s",
         duration_ms,
-        len(text),
-        usage.get("completion_tokens"),
+        len(combined_text),
+        total_tokens,
     )
 
     return {
         "prompt": prompt,
-        "description": text,
+        "description": combined_text,
         "frame_names": frame_names,
-        "tokens_generated": usage.get("completion_tokens"),
-        "duration_ms": duration_ms,
+        "tokens_generated": total_tokens,
+        "duration_ms": total_duration_ms,
+        "generation_params": {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "repetition_penalty": repetition_penalty,
+        },
+    }
+
+
+@app.post("/generate_paragraph")
+async def generate_paragraph_from_frames(
+    prompt: str = Form(COMPANY_STYLE_PROMPT),
+    frames: List[UploadFile] = File(..., description="Frame images in chronological order"),
+    max_new_tokens: int = Form(30, description="Tokens to produce"),
+    temperature: float = Form(0.7, description="Sampling temperature"),
+    top_p: float = Form(0.9, description="Top-p sampling"),
+    top_k: int = Form(40, description="Top-k sampling"),
+    repetition_penalty: float = Form(1.2, description="Penalize repeated tokens"),
+):
+    if not frames:
+        logger.warning("/generate_paragraph called without frames")
+        raise HTTPException(status_code=400, detail="At least one frame is required")
+
+    frame_names = [upload.filename or f"frame_{idx}" for idx, upload in enumerate(frames, 1)]
+    logger.info(
+        "/generate_paragraph called | frame_count=%d | prompt_len=%d | frame_names=%s",
+        len(frames),
+        len(prompt or ""),
+        frame_names,
+    )
+
+    images = [await load_image(f) for f in frames]
+    image_chunks = chunk_frames(images, HF_CHUNK_SIZE)
+    if not image_chunks:
+        logger.error("No chunks generated for /generate_paragraph")
+        raise HTTPException(status_code=400, detail="Unable to create frame chunks")
+    client_state: Dict[str, int] = {
+        "variation_index": 0,
+        "sample_set_index": 0,
+        "sample_line_index": 0,
+    }
+
+    history: List[str] = []
+    total_tokens = 0
+    total_duration_ms = 0.0
+    start = time.perf_counter()
+    final_chunk_text = ""
+
+    for idx, chunk in enumerate(image_chunks):
+        print('chunk size', len(chunk))
+        running_context = " ".join(history[-2:])
+        chunk_prompt = (
+            prompt
+            if idx == 0
+            else f"{prompt} Previous narration: {running_context}. Continue with the next batch."
+        )
+        chunk_messages = build_messages(chunk_prompt, chunk)
+        chunk_start = time.perf_counter()
+        chunk_response = await call_hf_non_streaming(
+            chunk_messages,
+            max_new_tokens,
+            temperature,
+            top_p,
+            top_k,
+            repetition_penalty,
+        )
+        chunk_duration = (time.perf_counter() - chunk_start) * 1000
+        total_duration_ms += chunk_duration
+
+        try:
+            chunk_text = chunk_response["choices"][0]["message"]["content"]
+            usage = chunk_response.get("usage", {})
+        except Exception:
+            logger.exception("Bad HF response shape for /generate_paragraph chunk %d", idx + 1)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Unexpected HF response for chunk {idx + 1}: {chunk_response}",
+            )
+
+        if not chunk_text:
+            logger.warning("Chunk %d returned empty text during /generate_paragraph", idx + 1)
+            continue
+
+        history.append(chunk_text.strip())
+        final_chunk_text = chunk_text.strip()
+        total_tokens += usage.get("completion_tokens", 0) or 0
+        logger.info(
+            "/generate_paragraph chunk %d/%d completed | duration_ms=%.2f | len=%d | tokens=%s",
+            idx + 1,
+            len(image_chunks),
+            chunk_duration,
+            len(chunk_text),
+            usage.get("completion_tokens"),
+        )
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    if not final_chunk_text:
+        logger.error("All /generate_paragraph chunks returned empty text")
+        raise HTTPException(status_code=500, detail="Model returned no text in any chunk")
+
+    formatted = format_commentary(final_chunk_text, client_state)
+
+    logger.info(
+        "/generate_paragraph completed | total_duration_ms=%.2f | aggregated_len=%d | tokens=%s",
+        duration_ms,
+        len(formatted),
+        total_tokens,
+    )
+
+    return {
+        "prompt": prompt,
+        "text": formatted,
+        "frame_names": frame_names,
+        "tokens_generated": total_tokens,
+        "duration_ms": total_duration_ms,
         "generation_params": {
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
@@ -455,7 +631,7 @@ async def websocket_stream(websocket: WebSocket):
 
                 async for raw in call_hf_streaming(
                     messages,
-                    msg.get("max_new_tokens", 512),
+                    msg.get("max_new_tokens", 30),
                     msg.get("temperature", 0.7),
                     msg.get("top_p", 0.9),
                     msg.get("top_k", 40),

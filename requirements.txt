@@ -9,3 +9,5 @@ python-multipart>=0.0.6
 pyttsx3>=2.90
 kokoro
 soundfile
+imageio
+imageio-ffmpeg

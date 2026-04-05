@@ -1,5 +1,5 @@
 :root {
-  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   background-color: #05060c;
   color: #f7f8fb;
 }
@@ -53,8 +53,7 @@ h1 {
   font-size: 0.95rem;
 }
 
-.field input[type='text'],
-.field input[type='file'] {
+.field input[type= file] {
   padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.25);
@@ -114,4 +113,41 @@ video {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 0.85rem;
+}
+
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 6, 12, 0.9);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  transition: opacity 0.25s ease;
+}
+
+.loading-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.loading-overlay__content {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 24px;
+  border-radius: 16px;
+  text-align: center;
+  color: #f7f8fb;
+}
+
+.loading-overlay__message {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.loading-overlay__hint {
+  margin: 8px 0 0;
+  font-size: 0.9rem;
+  opacity: 0.8;
 }
